@@ -20,36 +20,34 @@ PARQUET_POINTS <- "parquet/points.parquet"
 DEFAULT_DOMAIN <- "farcoast"                 # Domain label (added if Parquet lacks a domain column)
 JS_MovingMarker <- "js/Leaflet.MovingMarker.js"
 
-if (shiny::isRunning()) {
-  PARQUET_TRAJ <- "/dev/shinyserver_data/trajectories.parquet"
-  PARQUET_REL  <- "/dev/shinyserver_data/release_points.parquet"
-  PARQUET_POINTS <- "/dev/shinyserver_data/points.parquet"
-}
+options(arrow.use_threads = TRUE)
 
 # ---- Load Parquet once ----------------------------------------------------
-traj_sf <- st_read_parquet(PARQUET_TRAJ)
-rel_sf  <- st_read_parquet(PARQUET_REL)
 pts_ds  <- open_dataset(PARQUET_POINTS, format = "parquet")
 
-# normalize columns
-ttraj <- traj_sf |>
-  rename(ptype = particle_type, seed_id = poly_id)
-trel  <- rel_sf  |>
-  rename(ptype = particle_type, seed_id = poly_id)
+# Read the SMALL release_points.parquet as sf (only once) to get lon/lat
+trel <- sfarrow::st_read_parquet(PARQUET_REL) |>
+  dplyr::rename(ptype = particle_type, seed_id = poly_id)
+
 
 fmt_start <- function(t) format(as.POSIXct(t, tz = "UTC"), "%Y-%m-%dT%H-%MZ")
-ttraj$start <- fmt_start(ttraj$release_time)
-trel$start  <- fmt_start(trel$release_time)
+trel$start <- fmt_start(trel$release_time)
 
 # ---- Seeds & index --------------------------------------------------------
-seeds <- trel |>
-  mutate(lon = st_coordinates(geometry)[,1], lat = st_coordinates(geometry)[,2]) |>
-  group_by(domain, ptype, seed_id, start, release_depth, sink_vel) |>
-  summarise(lon = first(lon), lat = first(lat), .groups = "drop") |>
-  as.data.frame()
 
-traj_index <- ttraj |>
-  st_drop_geometry() |>
+# Make a flat data.frame: one row per seed, with lon/lat & selection keys
+seeds <- trel |>
+  mutate(
+    lon = sf::st_coordinates(geometry)[,1],
+    lat = sf::st_coordinates(geometry)[,2]
+  ) |>
+  st_set_geometry(NULL) |>
+  # keep only what the app needs
+  select(domain, ptype, seed_id, pid, start, release_depth, sink_vel, lon, lat) |>
+  distinct()
+
+# Compact index for UI dropdowns and click-snapping logic
+traj_index <- seeds |>
   select(domain, start, release_depth, sink_vel, ptype, seed_id, pid) |>
   distinct()
 
@@ -62,31 +60,31 @@ nearest_seed <- function(lon, lat, seeds_subset) {
 }
 
 traj_from_points <- function(domain, start, depth, sinkvel, ptype, seed_id){
-  
-  start_dt <- as.POSIXct(start, format="%Y-%m-%dT%H-%MZ", tz="UTC")
 
-  if(ptype == "duck") {
-    depth_numeric = as.numeric(depth)
-    rel_sub <- trel |>
-    filter(
-      .data$domain == !!domain, 
-      .data$start == !!start, 
-      .data$release_depth == !!depth_numeric,
-      .data$ptype == !!ptype, 
-      .data$seed_id == !!seed_id)
+  # choose one pid that matches the UI state + the snapped seed
+  if (ptype == "duck") {
+    rel_sub <- seeds |>
+      filter(
+        .data$domain == !!domain,
+        .data$start  == !!start,
+        .data$ptype  == !!ptype,
+        .data$seed_id == !!seed_id,
+        .data$release_depth == !!as.numeric(depth)
+      )
+  } else if (ptype == "poop") {
+    rel_sub <- seeds |>
+      filter(
+        .data$domain == !!domain,
+        .data$start  == !!start,
+        .data$ptype  == !!ptype,
+        .data$seed_id == !!seed_id,
+        .data$sink_vel == !!as.numeric(sinkvel)
+      )
+  } else {
+    rel_sub <- seeds[0,]
   }
 
-  if(ptype == "poop") {
-    sinkvel_numeric = sinkvel
-    rel_sub <- trel |>
-    filter(
-      .data$domain == !!domain, 
-      .data$start == !!start, 
-      .data$sink_vel == !!sinkvel_numeric,
-      .data$ptype == !!ptype, 
-      .data$seed_id == !!seed_id)
-  }
-
+  if (!nrow(rel_sub)) return(NULL)
   pid_pick <- rel_sub$pid[[1]]
 
   tbl <- pts_ds |>
@@ -97,29 +95,13 @@ traj_from_points <- function(domain, start, depth, sinkvel, ptype, seed_id){
     select(lon, lat, time, age_min) |>
     arrange(time) |>
     collect()
+
   if (!nrow(tbl)) return(NULL)
 
   coords <- as.matrix(tbl[, c("lon","lat")])
   seg_ms <- diff(tbl$age_min) * 60 * 1000
 
   list(coords = coords, age_min = tbl$age_min, seg_ms = as.numeric(seg_ms), pid = pid_pick)
-}
-
-
-# Return n×2 matrix [lon, lat] for a chosen (domain, start, ptype, seed_id)
-traj_coords_from_geoparquet <- function(domain, start, depth, ptype, seed_id) {
-  sub <- traj_sf |>
-    dplyr::filter(.data$domain == domain,
-                  .data$start  == start,
-                  .data$release_depth == depth,
-                  .data$particle_type == ptype,
-                  .data$poly_id == seed_id)
-  if (nrow(sub) == 0) return(NULL)
-  # pick first pid per seed: smallest pid
-  sub <- sub[order(sub$pid), ][1, , drop = FALSE]
-  coords <- sf::st_coordinates(sub$geometry)
-  if (is.null(coords) || nrow(coords) < 2) return(NULL)
-  as.matrix(coords[, c("X","Y"), drop = FALSE])
 }
 
 # ---- Module: UI -----------------------------------------------------------
@@ -160,18 +142,6 @@ mod_traj_panel_ui <- function(id, title_label, icon_src, message, bg1 = "#FFE66D
 mod_traj_panel_server <- function(id, ptype){
   moduleServer(id, function(input, output, session){
     ns <- session$ns
-
-    # # Limit Domain choices to those that actually have this ptype
-    # observe({
-    #   doms <- sort(unique(traj_index$domain[ traj_index$ptype == ptype ]))
-    #   if (length(doms) == 0) {
-    #     showNotification("No domains available for this particle type.", type = "warning", duration = 5)
-    #     updateSelectInput(session, "domain", choices = character(0), selected = character(0))
-    #     updateSelectInput(session, "start",  choices = character(0), selected = character(0))
-    #     return()
-    #   }
-    #   updateSelectInput(session, "domain", choices = doms, selected = doms[1])
-    # })
 
     # domain filter
     observeEvent(ptype, {
@@ -227,9 +197,11 @@ mod_traj_panel_server <- function(id, ptype){
 
     # Leaflet map
     output$map <- renderLeaflet({
+      ctr <- c(lng = mean(seeds$lon, na.rm=TRUE), lat = mean(seeds$lat, na.rm=TRUE))
       leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
         addProviderTiles(providers$CartoDB.Positron) |>
-        setView(lng = mean(seeds$lon, na.rm=TRUE), lat = mean(seeds$lat, na.rm=TRUE), zoom = 10) |>
+        setView(lng = ctr["lng"], lat = ctr["lat"], zoom = 10) |>
+        #setView(lng = mean(seeds$lon, na.rm=TRUE), lat = mean(seeds$lat, na.rm=TRUE), zoom = 10) |>
         htmlwidgets::onRender("function(el,x){ _registerMapInline(this); }")
     })
 
