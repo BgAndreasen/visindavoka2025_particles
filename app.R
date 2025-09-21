@@ -39,17 +39,18 @@ trel$start <- fmt_start(trel$release_time)
 seeds <- trel |>
   mutate(
     lon = sf::st_coordinates(geometry)[,1],
-    lat = sf::st_coordinates(geometry)[,2]
+    lat = sf::st_coordinates(geometry)[,2],
+    sink_vel = as.numeric(sink_vel) * 100
   ) |>
   st_set_geometry(NULL) |>
   # keep only what the app needs
   select(domain, ptype, seed_id, pid, start, release_depth, sink_vel, lon, lat) |>
-  distinct()
+  distinct_all()
 
 # Compact index for UI dropdowns and click-snapping logic
 traj_index <- seeds |>
   select(domain, start, release_depth, sink_vel, ptype, seed_id, pid) |>
-  distinct()
+  distinct_all()
 
 # ---- Helpers --------------------------------------------------------------
 nearest_seed <- function(lon, lat, seeds_subset) {
@@ -57,6 +58,13 @@ nearest_seed <- function(lon, lat, seeds_subset) {
   d <- geosphere::distHaversine(cbind(seeds_subset$lon, seeds_subset$lat), c(lon, lat))
   i <- which.min(d)
   list(seed_id = seeds_subset$seed_id[i], lon = seeds_subset$lon[i], lat = seeds_subset$lat[i])
+}
+
+as_choices <- function(values, labels = NULL) {
+  values <- unname(values)
+  if (is.null(labels)) labels <- as.character(values)
+  labels <- unname(labels)
+  stats::setNames(as.list(values), labels)  # named LIST, not a named vector
 }
 
 traj_from_points <- function(domain, start, depth, sinkvel, ptype, seed_id){
@@ -146,20 +154,36 @@ mod_traj_panel_server <- function(id, ptype){
     # domain filter
     observeEvent(ptype, {
       ptype_val <- ptype
-      doms <- seeds |> filter(ptype == ptype_val) |> distinct(domain) |> pull(domain)
+      
+      doms <- traj_index |> 
+        filter(ptype == ptype_val) |> 
+        distinct(domain) |> 
+        pull(domain)
+
       output$domain_ui <- renderUI({
-        selectInput(ns("domain"), "Domain", choices = doms, selected = if (length(doms)) head(doms,1) else NULL)
+        selectInput(ns("domain"), "FarCoast domain", 
+        #choices = as_choices(doms), 
+        choices = doms,
+        selected = if (length(doms)) doms[[1]] else NULL)
       })
     }, ignoreInit = FALSE)
 
     # starts filter
     observeEvent(input$domain, {
       req(input$domain)
-      starts <- sort(unique(traj_index$start[
-        traj_index$domain == input$domain & traj_index$ptype == ptype
-      ]))
+      #starts <- sort(unique(traj_index$start[
+      #  traj_index$domain == input$domain & traj_index$ptype == ptype
+      #]))
+      starts <- traj_index |> 
+        filter(.data$ptype == ptype & .data$domain == domain) |> 
+        distinct(start) |> 
+        pull(start)
+      
       output$start_ui <- renderUI({
-        selectInput(ns("start"), "Start time", choices = starts, selected = if (length(starts)) head(starts,1) else NULL)
+        selectInput(ns("start"), "Release time", 
+        #choices = as_choices(starts), 
+        choices = starts,
+        selected = if (length(starts)) starts[[1]] else NULL)
       })
     }, ignoreInit = FALSE)
 
@@ -168,13 +192,21 @@ mod_traj_panel_server <- function(id, ptype){
       req(input$domain, input$start)
 
       if(ptype == "duck"){
-      depths <- sort(unique(traj_index$release_depth[
-        traj_index$domain == input$domain & 
-          traj_index$ptype == ptype & 
-          traj_index$start == input$start
-      ]))
+        
+        depths <- traj_index |> 
+          filter(
+            ptype == ptype &
+            domain == input$domain &
+            start == input$start
+              ) |> 
+          distinct(release_depth) |> 
+          pull(release_depth)
+        
       output$depth_ui <- renderUI({
-        selectInput(ns("depth"), "Release Depth", choices = depths, selected = if (length(depths)) head(depths,1) else NULL)
+        selectInput(ns("depth"), "Release Depth", 
+        choices = as_choices(depths), 
+        #choices = depths,
+        selected = if (length(depths)) depths[[1]] else NULL)
       })
       } 
     }, ignoreInit = FALSE)
@@ -190,7 +222,9 @@ mod_traj_panel_server <- function(id, ptype){
           seeds$start == input$start
       ]))
       output$sink_ui <- renderUI({
-        selectInput(ns("sink"), "Sinking velocity (cm/s)", choices = sinks, selected = if (length(sinks)) head(sinks,1) else NULL)
+        selectInput(ns("sink"), "Sinking velocity (cm/s)", 
+        choices = as_choices(sinks), 
+        selected = if (length(sinks)) sinks[[1]] else NULL)
       })
       } 
     }, ignoreInit = FALSE)
@@ -200,7 +234,7 @@ mod_traj_panel_server <- function(id, ptype){
       ctr <- c(lng = mean(seeds$lon, na.rm=TRUE), lat = mean(seeds$lat, na.rm=TRUE))
       leaflet(options = leafletOptions(preferCanvas = TRUE)) |>
         addProviderTiles(providers$CartoDB.Positron) |>
-        setView(lng = ctr["lng"], lat = ctr["lat"], zoom = 10) |>
+        setView(lng = ctr["lng"], lat = ctr["lat"], zoom = 13) |>
         #setView(lng = mean(seeds$lon, na.rm=TRUE), lat = mean(seeds$lat, na.rm=TRUE), zoom = 10) |>
         htmlwidgets::onRender("function(el,x){ _registerMapInline(this); }")
     })
@@ -293,14 +327,14 @@ mod_traj_panel_server <- function(id, ptype){
 
       session$sendCustomMessage("addDuck", list(
         coords = latlng,
-        times   = as.numeric(times_v),
-        age_min = as.numeric(age_min),
+        times   = unname(as.numeric(times_v)),
+        age_min = unname(as.numeric(age_min)),
         iconPng = pngPath
       ))
 
       session$sendCustomMessage("setAgeBins", list(
-        breaksMin = c(60, 300, 600),                  # 0–1h, 1–5h, 5–10h, >10h
-        colors    = c("#2ecc71", "#f1c40f", "#e67e22", "#e74c3c")  # green→red
+        breaksMin = unname(c(60, 300, 600)),                  # 0–1h, 1–5h, 5–10h, >10h
+        colors    = unname(c("#2ecc71", "#f1c40f", "#e67e22", "#e74c3c"))  # green→red
       ))
 
     })
