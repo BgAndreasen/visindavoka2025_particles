@@ -20,6 +20,12 @@ PARQUET_POINTS <- "parquet/points.parquet"
 DEFAULT_DOMAIN <- "farcoast"                 # Domain label (added if Parquet lacks a domain column)
 JS_MovingMarker <- "js/Leaflet.MovingMarker.js"
 
+if (shiny::isRunning()) {
+  PARQUET_TRAJ <- "/dev/shinyserver_data/trajectories.parquet"
+  PARQUET_REL  <- "/dev/shinyserver_data/release_points.parquet"
+  PARQUET_POINTS <- "/dev/shinyserver_data/points.parquet"
+}
+
 # ---- Load Parquet once ----------------------------------------------------
 traj_sf <- st_read_parquet(PARQUET_TRAJ)
 rel_sf  <- st_read_parquet(PARQUET_REL)
@@ -235,7 +241,7 @@ mod_traj_panel_server <- function(id, ptype){
     })
     observeEvent(input$pause_btn,  { session$sendCustomMessage("ducksCtrl", list(cmd="pause")) })
     observeEvent(input$resume_btn, { session$sendCustomMessage("ducksCtrl", list(cmd="resume")) })
-    observeEvent(list(input$domain, input$start, input$depth), {
+    observeEvent(list(input$domain, input$start, input$depth, input$sink), {
       leafletProxy(ns("map")) |> clearGroup("start")
       session$sendCustomMessage("clearDucks", list())
       session$sendCustomMessage("clearTrails", list())
