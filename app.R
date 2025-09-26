@@ -131,13 +131,14 @@ mod_traj_panel_ui <- function(id, title_label, icon_src, message, bg1 = "#FFE66D
         uiOutput(ns("start_ui")),
         uiOutput(ns("depth_ui")),
         uiOutput(ns("sink_ui")),
-        sliderInput(ns("mps"), "Model minutes pr. real second", min = 15, max = 120, value = 30, step = 15),
+        sliderInput(
+          ns("mps"), "Model minutes pr. real second", min = 5, max = 120, value = 10, step = 5),
         div(style = "display:flex; gap:10px; align-items:center; margin:20px 0; flex-wrap:wrap;",
             actionButton(ns("resume_btn"), label = div(bs_icon("play-fill"),  "Play"),  class = "btn btn-success"),
             actionButton(ns("pause_btn"),  label = div(bs_icon("pause-fill"), "Pause"), class = "btn btn-warning"),
             actionButton(ns("clear"),      label = div(bs_icon("trash3-fill"),"Clear"), class = "btn btn-danger")
         ),
-        helpText("Click the map to launch a particle. Each click adds another moving particle and keeps the trail.")
+        helpText("Click the map to launch a particle.")
       ),
       mainPanel(
         leafletOutput(ns("map"), height = 640)
