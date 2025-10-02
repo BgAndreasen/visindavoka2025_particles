@@ -51,6 +51,8 @@ rsconnect/
 # files 
 project_brief.md
 testing.R
+README.html
+README_files/
 
 # parguet files
 parquet/
